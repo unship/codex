@@ -4,11 +4,18 @@ use crate::error::ApiError;
 use crate::provider::Provider;
 use codex_client::HttpTransport;
 use codex_client::RequestTelemetry;
+use codex_protocol::openai_models::ConfigShellToolType;
 use codex_protocol::openai_models::ModelInfo;
+use codex_protocol::openai_models::ModelVisibility;
 use codex_protocol::openai_models::ModelsResponse;
+use codex_protocol::openai_models::ReasoningEffort;
+use codex_protocol::openai_models::ReasoningEffortPreset;
+use codex_protocol::openai_models::TruncationPolicyConfig;
+use codex_protocol::openai_models::default_input_modalities;
 use http::HeaderMap;
 use http::Method;
 use http::header::ETAG;
+use serde::Deserialize;
 use std::sync::Arc;
 
 pub struct ModelsClient<T: HttpTransport, A: AuthProvider> {
@@ -61,16 +68,90 @@ impl<T: HttpTransport, A: AuthProvider> ModelsClient<T, A> {
             .and_then(|value| value.to_str().ok())
             .map(ToString::to_string);
 
-        let ModelsResponse { models } = serde_json::from_slice::<ModelsResponse>(&resp.body)
-            .map_err(|e| {
-                ApiError::Stream(format!(
-                    "failed to decode models response: {e}; body: {}",
-                    String::from_utf8_lossy(&resp.body)
-                ))
-            })?;
+        let models = decode_models_response(&resp.body).map_err(|e| {
+            ApiError::Stream(format!(
+                "failed to decode models response: {e}; body: {}",
+                String::from_utf8_lossy(&resp.body)
+            ))
+        })?;
 
         Ok((models, header_etag))
     }
+}
+
+/// Decode models from either Codex/OpenAI-style `{"models": [...]}` or
+/// OpenRouter-style `{"data": [...]}`.
+fn decode_models_response(body: &[u8]) -> Result<Vec<ModelInfo>, serde_json::Error> {
+    if let Ok(ModelsResponse { models }) = serde_json::from_slice::<ModelsResponse>(body) {
+        return Ok(models);
+    }
+    #[derive(Deserialize)]
+    struct DataModelsResponse {
+        data: Vec<serde_json::Value>,
+    }
+    let DataModelsResponse { data } = serde_json::from_slice::<DataModelsResponse>(body)?;
+    Ok(data
+        .into_iter()
+        .filter_map(openrouter_entry_to_model_info)
+        .collect())
+}
+
+/// Map an OpenRouter-style model entry (id, canonical_slug, name, context_length, etc.)
+/// to Codex ModelInfo with best-effort field mapping. Returns None if the entry is not an object.
+fn openrouter_entry_to_model_info(value: serde_json::Value) -> Option<ModelInfo> {
+    let obj = value.as_object()?;
+    let slug = obj
+        .get("canonical_slug")
+        .or_else(|| obj.get("id"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown")
+        .to_string();
+    let display_name = obj
+        .get("name")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let description = obj
+        .get("description")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string);
+    let context_window = obj
+        .get("context_length")
+        .and_then(serde_json::Value::as_i64);
+    Some(ModelInfo {
+        slug,
+        display_name,
+        description,
+        default_reasoning_level: Some(ReasoningEffort::Medium),
+        supported_reasoning_levels: vec![ReasoningEffortPreset {
+            effort: ReasoningEffort::Medium,
+            description: "medium".to_string(),
+        }],
+        shell_type: ConfigShellToolType::ShellCommand,
+        visibility: ModelVisibility::List,
+        supported_in_api: true,
+        input_modalities: default_input_modalities(),
+        used_fallback_model_metadata: false,
+        priority: 0,
+        availability_nux: None,
+        default_reasoning_summary: codex_protocol::config_types::ReasoningSummary::Auto,
+        web_search_tool_type: codex_protocol::openai_models::WebSearchToolType::Text,
+        supports_image_detail_original: false,
+        supports_search_tool: false,
+        upgrade: None,
+        base_instructions: "You are a helpful assistant.".to_string(),
+        model_messages: None,
+        supports_reasoning_summaries: false,
+        support_verbosity: false,
+        default_verbosity: None,
+        apply_patch_tool_type: None,
+        truncation_policy: TruncationPolicyConfig::bytes(10_000),
+        supports_parallel_tool_calls: false,
+        context_window,
+        auto_compact_token_limit: None,
+        effective_context_window_percent: 95,
+        experimental_supported_tools: Vec::new(),
+    })
 }
 
 #[cfg(test)]
@@ -268,5 +349,26 @@ mod tests {
 
         assert_eq!(models.len(), 0);
         assert_eq!(etag, Some("\"abc\"".to_string()));
+    }
+
+    #[tokio::test]
+    async fn list_models_parses_openrouter_data_format() {
+        let body = json!({
+            "data": [
+                {
+                    "id": "anthropic/claude-sonnet-4.6",
+                    "canonical_slug": "anthropic/claude-4.6-sonnet-20260217",
+                    "name": "Anthropic: Claude Sonnet 4.6",
+                    "description": "Sonnet 4.6 is Anthropic's most capable Sonnet-class model.",
+                    "context_length": 1000000
+                }
+            ]
+        });
+        let body_bytes = serde_json::to_vec(&body).unwrap();
+        let models = super::decode_models_response(&body_bytes).expect("decode data format");
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].slug, "anthropic/claude-4.6-sonnet-20260217");
+        assert_eq!(models[0].display_name, "Anthropic: Claude Sonnet 4.6");
+        assert_eq!(models[0].context_window, Some(1_000_000));
     }
 }

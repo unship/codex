@@ -7,16 +7,31 @@ use std::time::Instant;
 
 use anyhow::Context;
 use anyhow::Result;
+use codex_core::features::Feature;
+use codex_core::ModelProviderInfo;
+use codex_core::WireApi;
+use codex_core::built_in_model_providers;
 use codex_core::sandboxing::SandboxPermissions;
-use codex_features::Feature;
+use codex_protocol::openai_models::ConfigShellToolType;
+use codex_protocol::openai_models::ModelInfo;
+use codex_protocol::openai_models::ModelVisibility;
+use codex_protocol::openai_models::ModelsResponse;
+use codex_protocol::openai_models::ReasoningEffort;
+use codex_protocol::openai_models::ReasoningEffortPreset;
+use codex_protocol::openai_models::TruncationPolicyConfig;
+use codex_protocol::openai_models::default_input_modalities;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::SandboxPolicy;
 use core_test_support::assert_regex_match;
+use core_test_support::responses::anthropic_sse_assistant_message;
+use core_test_support::responses::anthropic_sse_tool_use_then_stop;
 use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
 use core_test_support::responses::ev_custom_tool_call;
 use core_test_support::responses::ev_function_call;
 use core_test_support::responses::ev_response_created;
+use core_test_support::responses::mount_anthropic_sse_once;
+use core_test_support::responses::mount_models_once;
 use core_test_support::responses::mount_sse_once;
 use core_test_support::responses::mount_sse_sequence;
 use core_test_support::responses::sse;
@@ -588,6 +603,96 @@ execution error: .*$"#;
         assert_regex_match(fallback_pattern, output);
     }
     assert!(output.len() <= 10 * 1024);
+
+    Ok(())
+}
+
+/// Minimal ModelInfo for Anthropic wire tests (GET /v1/models).
+fn anthropic_test_model() -> ModelInfo {
+    ModelInfo {
+        slug: "claude-3-5-sonnet-test".to_string(),
+        display_name: "Claude test".to_string(),
+        description: Some("Anthropic test model".to_string()),
+        default_reasoning_level: Some(ReasoningEffort::Medium),
+        supported_reasoning_levels: vec![ReasoningEffortPreset {
+            effort: ReasoningEffort::Medium,
+            description: ReasoningEffort::Medium.to_string(),
+        }],
+        shell_type: ConfigShellToolType::ShellCommand,
+        visibility: ModelVisibility::List,
+        supported_in_api: true,
+        input_modalities: default_input_modalities(),
+        prefer_websockets: false,
+        used_fallback_model_metadata: false,
+        priority: 0,
+        upgrade: None,
+        base_instructions: "You are a helpful assistant.".to_string(),
+        model_messages: None,
+        supports_reasoning_summaries: false,
+        support_verbosity: false,
+        default_verbosity: None,
+        apply_patch_tool_type: None,
+        truncation_policy: TruncationPolicyConfig::bytes(10_000),
+        supports_parallel_tool_calls: false,
+        context_window: Some(200_000),
+        auto_compact_token_limit: None,
+        effective_context_window_percent: 95,
+        experimental_supported_tools: Vec::new(),
+    }
+}
+
+/// Full flow: prompt with tools → model returns tool call → agent runs tool and
+/// sends tool result → model returns completion. Uses Anthropic wire (POST /v1/messages).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn anthropic_tool_call_flow_sends_tool_result_then_gets_completion() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let server_uri = server.uri();
+
+    mount_models_once(
+        &server,
+        ModelsResponse {
+            models: vec![anthropic_test_model()],
+        },
+    )
+    .await;
+
+    let call_id = "anthropic-call-1";
+    let args = serde_json::to_string(&json!({"command": ["echo", "hi"]}))?;
+    let first_mock = mount_anthropic_sse_once(
+        &server,
+        anthropic_sse_tool_use_then_stop("resp-1", call_id, "shell", &args),
+    )
+    .await;
+    let second_mock =
+        mount_anthropic_sse_once(&server, anthropic_sse_assistant_message("resp-2", "done")).await;
+
+    let test = test_codex()
+        .with_model("claude-3-5-sonnet-test")
+        .with_config(move |config| {
+            config.model_provider = ModelProviderInfo {
+                base_url: Some(server_uri.clone()),
+                wire_api: WireApi::AnthropicMessages,
+                experimental_bearer_token: Some("test-token".to_string()),
+                ..built_in_model_providers()["openai"].clone()
+            };
+        })
+        .build(&server)
+        .await?;
+
+    test.submit_turn_with_policies(
+        "run echo hi",
+        AskForApproval::Never,
+        SandboxPolicy::DangerFullAccess,
+    )
+    .await?;
+
+    let _ = first_mock.single_request();
+    assert!(
+        second_mock.single_request().has_tool_result(call_id),
+        "second request (continuation) must contain tool_result for {call_id}"
+    );
 
     Ok(())
 }

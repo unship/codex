@@ -271,6 +271,9 @@ impl StatusHistoryCell {
                     .unwrap_or_else(|| "auto".to_string()),
             ));
         }
+        if config.model_provider.wire_api == WireApi::AnthropicMessages {
+            config_entries.push(("wire", "anthropic_messages".to_string()));
+        }
         let (model_name, model_details) = compose_model_display(model_name, &config_entries);
         let approval = config_entries
             .iter()

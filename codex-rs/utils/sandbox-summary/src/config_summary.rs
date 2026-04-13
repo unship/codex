@@ -34,6 +34,9 @@ pub fn create_config_summary_entries(config: &Config, model: &str) -> Vec<(&'sta
                 .unwrap_or_else(|| "none".to_string()),
         ));
     }
+    if config.model_provider.wire_api == WireApi::AnthropicMessages {
+        entries.push(("wire", "anthropic_messages".to_string()));
+    }
 
     entries
 }

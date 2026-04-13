@@ -538,6 +538,15 @@ fn run_execpolicycheck(cmd: ExecPolicyCheckCommand) -> anyhow::Result<()> {
     cmd.run()
 }
 
+#[cfg(not(feature = "debug-app-server"))]
+async fn run_debug_app_server_command(_cmd: DebugAppServerCommand) -> anyhow::Result<()> {
+    anyhow::bail!(
+        "debug app-server commands are not built in this binary. \
+         Build with `cargo install --path ./cli --features debug-app-server` to enable them."
+    )
+}
+
+#[cfg(feature = "debug-app-server")]
 async fn run_debug_app_server_command(cmd: DebugAppServerCommand) -> anyhow::Result<()> {
     match cmd.subcommand {
         DebugAppServerSubcommand::SendMessageV2(cmd) => {

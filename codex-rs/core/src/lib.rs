@@ -120,6 +120,8 @@ pub mod review_prompts;
 mod thread_manager;
 pub(crate) mod web_search;
 pub(crate) mod windows_sandbox_read_grants;
+mod wire_anthropic;
+pub use codex_protocol::protocol::InitialHistory;
 pub use thread_manager::ForkSnapshot;
 pub use thread_manager::NewThread;
 pub use thread_manager::ThreadManager;
@@ -180,6 +182,11 @@ mod state;
 mod tasks;
 mod user_shell_command;
 pub mod util;
+pub use codex_shell_command::bash;
+pub use codex_shell_command::is_dangerous_command;
+pub use codex_shell_command::is_safe_command;
+pub use codex_shell_command::parse_command;
+pub use codex_shell_command::powershell;
 
 pub use client::ModelClient;
 pub use client::ModelClientSession;
@@ -189,6 +196,8 @@ pub use client_common::Prompt;
 pub use client_common::REVIEW_PROMPT;
 pub use client_common::ResponseEvent;
 pub use client_common::ResponseStream;
+pub use codex_sandboxing::get_platform_sandbox;
+pub use codex_tools::parse_tool_input_schema;
 pub use compact::content_items_to_text;
 pub use event_mapping::parse_turn_item;
 pub use exec_policy::ExecPolicyError;
@@ -197,6 +206,26 @@ pub use exec_policy::format_exec_policy_error_with_source;
 pub use exec_policy::load_exec_policy;
 pub use file_watcher::FileWatcherEvent;
 pub use turn_metadata::build_turn_metadata_header;
+// Re-export the protocol types from the standalone `codex-protocol` crate so existing
+// `codex_core::protocol::...` references continue to work across the workspace.
+pub use codex_protocol::protocol;
+// Re-export protocol config enums to ensure call sites can use the same types
+// as those in the protocol crate when constructing protocol messages.
+pub use codex_protocol::config_types as protocol_config_types;
+
+pub use client::ModelClient;
+pub use client::ModelClientSession;
+pub use client_common::Prompt;
+pub use client_common::REVIEW_PROMPT;
+pub use client_common::ResponseEvent;
+pub use client_common::ResponseStream;
+pub use codex_protocol::models::ContentItem;
+pub use codex_protocol::models::LocalShellAction;
+pub use codex_protocol::models::LocalShellExecAction;
+pub use codex_protocol::models::LocalShellStatus;
+pub use codex_protocol::models::ResponseItem;
+pub use compact::content_items_to_text;
+pub use event_mapping::parse_turn_item;
 pub mod compact;
 pub(crate) mod memory_trace;
 pub use memory_trace::BuiltMemory;

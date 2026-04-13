@@ -32,6 +32,13 @@ use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 
 use codex_api::ApiError;
+use crate::api_bridge::CoreAuthProvider;
+use crate::api_bridge::auth_provider_from_auth;
+use crate::api_bridge::map_api_error;
+use codex_api::AuthProvider;
+use crate::auth::UnauthorizedRecovery;
+use crate::auth_env_telemetry::AuthEnvTelemetry;
+use crate::auth_env_telemetry::collect_auth_env_telemetry;
 use codex_api::CompactClient as ApiCompactClient;
 use codex_api::CompactionInput as ApiCompactionInput;
 use codex_api::Compression;
@@ -1478,7 +1485,37 @@ impl ModelClientSession {
                 )
                 .await
             }
+            WireApi::AnthropicMessages => {
+                self.stream_anthropic_messages(
+                    prompt,
+                    model_info,
+                    session_telemetry,
+                    turn_metadata_header,
+                )
+                .await
+            }
         }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn stream_anthropic_messages(
+        &self,
+        prompt: &Prompt,
+        model_info: &ModelInfo,
+        otel_manager: &SessionTelemetry,
+        turn_metadata_header: Option<&str>,
+    ) -> Result<ResponseStream> {
+        let client_setup = self.client.current_client_setup().await?;
+        crate::wire_anthropic::stream_anthropic_messages(
+            &self.client.state.provider,
+            &client_setup.api_provider.base_url,
+            client_setup.api_auth.bearer_token(),
+            prompt,
+            model_info,
+            otel_manager.clone(),
+            turn_metadata_header,
+        )
+        .await
     }
 
     /// Permanently disables WebSockets for this Codex session and resets WebSocket state.

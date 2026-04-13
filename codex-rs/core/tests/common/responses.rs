@@ -968,6 +968,183 @@ fn models_mock() -> (MockBuilder, ModelsMock) {
     (mock, models_mock)
 }
 
+// --- Anthropic Messages API mock (POST /v1/messages) ---
+
+#[derive(Debug, Clone)]
+pub struct AnthropicMessagesRequest(wiremock::Request);
+
+impl AnthropicMessagesRequest {
+    pub fn body_json(&self) -> Value {
+        let body = decode_body_bytes(
+            &self.0.body,
+            self.0
+                .headers
+                .get("content-encoding")
+                .and_then(|v| v.to_str().ok()),
+        );
+        serde_json::from_slice(&body).unwrap()
+    }
+
+    /// Returns true if this request's messages contain a user message with a
+    /// tool_result for the given tool_use_id.
+    pub fn has_tool_result(&self, tool_use_id: &str) -> bool {
+        let body = self.body_json();
+        let messages = body
+            .get("messages")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten();
+        for msg in messages {
+            if msg.get("role").and_then(Value::as_str) != Some("user") {
+                continue;
+            }
+            let content = match msg.get("content").and_then(Value::as_array) {
+                Some(c) => c,
+                None => continue,
+            };
+            for block in content {
+                if block.get("type").and_then(Value::as_str) == Some("tool_result")
+                    && block.get("tool_use_id").and_then(Value::as_str) == Some(tool_use_id)
+                {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct AnthropicMessagesMock {
+    requests: Arc<Mutex<Vec<AnthropicMessagesRequest>>>,
+}
+
+impl AnthropicMessagesMock {
+    fn new() -> Self {
+        Self {
+            requests: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    pub fn single_request(&self) -> AnthropicMessagesRequest {
+        let requests = self.requests.lock().unwrap();
+        if requests.len() != 1 {
+            panic!(
+                "expected 1 Anthropic /v1/messages request, got {}",
+                requests.len()
+            );
+        }
+        requests.first().unwrap().clone()
+    }
+
+    pub fn requests(&self) -> Vec<AnthropicMessagesRequest> {
+        self.requests.lock().unwrap().clone()
+    }
+}
+
+impl Match for AnthropicMessagesMock {
+    fn matches(&self, request: &wiremock::Request) -> bool {
+        self.requests
+            .lock()
+            .unwrap()
+            .push(AnthropicMessagesRequest(request.clone()));
+        true
+    }
+}
+
+fn anthropic_messages_mock() -> (MockBuilder, AnthropicMessagesMock) {
+    let mock_instance = AnthropicMessagesMock::new();
+    let mock = Mock::given(method("POST"))
+        .and(path_regex(".*/v1/messages$"))
+        .and(mock_instance.clone());
+    (mock, mock_instance)
+}
+
+/// SSE body for Anthropic stream: message_start → content_block_start (tool_use) →
+/// content_block_stop → message_stop. The async-anthropic SDK expects event types
+/// and data as JSON for each event.
+pub fn anthropic_sse_tool_use_then_stop(
+    response_id: &str,
+    call_id: &str,
+    tool_name: &str,
+    arguments: &str,
+) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    let args: Value =
+        serde_json::from_str(arguments).unwrap_or(Value::Object(serde_json::Map::new()));
+    // message_start
+    writeln!(
+        &mut out,
+        "event: message_start\ndata: {{\"type\":\"message_start\",\"message\":{{\"id\":\"{response_id}\",\"model\":\"claude-3\",\"role\":\"assistant\",\"content\":[]}},\"usage\":null}}\n\n"
+    )
+    .unwrap();
+    // content_block_start (tool_use)
+    let block = serde_json::json!({
+        "type": "tool_use",
+        "id": call_id,
+        "name": tool_name,
+        "input": args
+    });
+    writeln!(
+        &mut out,
+        "event: content_block_start\ndata: {{\"type\":\"content_block_start\",\"index\":0,\"content_block\":{}}}\n\n",
+        block
+    )
+    .unwrap();
+    // content_block_stop
+    writeln!(
+        &mut out,
+        "event: content_block_stop\ndata: {{\"type\":\"content_block_stop\",\"index\":0}}\n\n"
+    )
+    .unwrap();
+    // message_stop
+    writeln!(
+        &mut out,
+        "event: message_stop\ndata: {{\"type\":\"message_stop\"}}\n\n"
+    )
+    .unwrap();
+    out
+}
+
+/// SSE body for Anthropic stream: message_start → content_block_start (text) →
+/// content_block_stop → message_stop (assistant text only).
+pub fn anthropic_sse_assistant_message(response_id: &str, text: &str) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    writeln!(
+        &mut out,
+        "event: message_start\ndata: {{\"type\":\"message_start\",\"message\":{{\"id\":\"{response_id}\",\"model\":\"claude-3\",\"role\":\"assistant\",\"content\":[]}},\"usage\":null}}\n\n"
+    )
+    .unwrap();
+    let escaped = text.replace('\\', "\\\\").replace('"', "\\\"");
+    writeln!(
+        &mut out,
+        "event: content_block_start\ndata: {{\"type\":\"content_block_start\",\"index\":0,\"content_block\":{{\"type\":\"text\",\"text\":\"{escaped}\"}}}}\n\n"
+    )
+    .unwrap();
+    writeln!(
+        &mut out,
+        "event: content_block_stop\ndata: {{\"type\":\"content_block_stop\",\"index\":0}}\n\n"
+    )
+    .unwrap();
+    writeln!(
+        &mut out,
+        "event: message_stop\ndata: {{\"type\":\"message_stop\"}}\n\n"
+    )
+    .unwrap();
+    out
+}
+
+pub async fn mount_anthropic_sse_once(server: &MockServer, body: String) -> AnthropicMessagesMock {
+    let (mock, mock_instance) = anthropic_messages_mock();
+    mock.respond_with(sse_response(body))
+        .up_to_n_times(1)
+        .mount(server)
+        .await;
+    mock_instance
+}
+
 pub async fn mount_sse_once_match<M>(server: &MockServer, matcher: M, body: String) -> ResponseMock
 where
     M: wiremock::Match + Send + Sync + 'static,

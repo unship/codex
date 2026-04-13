@@ -2043,6 +2043,13 @@
             "responses"
           ],
           "type": "string"
+        },
+        {
+          "description": "Anthropic Messages API (e.g. POST /v1/messages).",
+          "enum": [
+            "anthropic_messages"
+          ],
+          "type": "string"
         }
       ]
     }
